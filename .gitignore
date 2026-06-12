@@ -53,3 +53,23 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Profiling artefacts
+perf.data
+perf.data.old
+out.perf
+out.folded
+flamegraph.svg
+vtune_*/
+
+# Case study binaries
+01_loop_interchange/loop_bad
+01_loop_interchange/loop_good
+02_fp32_vs_fp16/fp64_scalar
+02_fp32_vs_fp16/fp32_scalar
+02_fp32_vs_fp16/fp32_vector
+03_avx_isa/avx_scalar
+03_avx_isa/avx_autovec
+03_avx_isa/avx_avx2
+04_docker_profiling/app/cpu_hog
+04_docker_profiling/app/mem_hog
