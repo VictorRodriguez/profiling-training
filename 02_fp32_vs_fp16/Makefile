@@ -1,45 +1,115 @@
-CC        = gcc
-CFLAGS    = -Wall -Wextra
-SRC       = fp_precision.c
+CC       = gcc
+CFLAGS   = -Wall -Wextra
+LDFLAGS  = -static
+SRC      = fp_precision.c
 
-# FP64 baseline – no vectorisation
-TARGET_FP64  = fp64_scalar
-# FP32 – compiler may auto-vectorise with 256-bit ymm registers
-TARGET_FP32  = fp32_scalar
-# FP32 with aggressive vectorisation + fast-math
-TARGET_FP32V = fp32_vector
+GCC_IMAGE = gcc:14.4.0
 
-.PHONY: all fp64 fp32 fp32v clean run
+TARGET_BASE       = fp_precision_base
+TARGET_AGGRESSIVE = fp_precision_aggressive
+TARGET_FP16       = fp_precision_fp16
 
-all: fp64 fp32 fp32v
+DOCKER_GCC = docker run --rm \
+	-v "$(CURDIR):/work" \
+	-w /work \
+	$(GCC_IMAGE) gcc
 
-fp64: $(SRC)
-	$(CC) $(CFLAGS) -O2 -o $(TARGET_FP64) $(SRC) -lm
+.PHONY: all base aggressive fp16 run asm clean
 
-fp32: $(SRC)
-	$(CC) $(CFLAGS) -O2 -o $(TARGET_FP32) $(SRC) -lm
+all: base aggressive fp16
 
-fp32v: $(SRC)
-	$(CC) $(CFLAGS) -O3 -march=native -ffast-math -funroll-loops \
-	    -ftree-vectorize -o $(TARGET_FP32V) $(SRC) -lm
+#
+# Baseline:
+#   GCC 11
+#   -O2
+#   FP64 + FP32 only
+#
+base: $(SRC)
+	$(CC) $(CFLAGS) -O2 \
+	    -o $(TARGET_BASE) $(SRC) \
+	    $(LDFLAGS) -lm
+
+#
+# Aggressive:
+#   GCC 11
+#   FP64 + FP32
+#
+aggressive: $(SRC)
+	$(CC) $(CFLAGS) \
+	    -O3 \
+	    -march=native \
+	    -ffast-math \
+	    -funroll-loops \
+	    -ftree-vectorize \
+	    -o $(TARGET_AGGRESSIVE) $(SRC) \
+	    $(LDFLAGS) -lm
+
+#
+# Aggressive FP16:
+#   GCC 14 container
+#   FP64 + FP32 + FP16
+#
+fp16: $(SRC)
+	$(DOCKER_GCC) $(CFLAGS) \
+	    -DENABLE_FP16 \
+	    -O3 \
+	    -march=native \
+	    -ffast-math \
+	    -funroll-loops \
+	    -ftree-vectorize \
+	    -mavx512fp16 \
+	    -o $(TARGET_FP16) $(SRC) \
+	    $(LDFLAGS) -lm
 
 run: all
-	@echo "=== FP64 scalar (-O2) ==="
-	./$(TARGET_FP64)
-	@echo ""
-	@echo "=== FP32 scalar (-O2) ==="
-	./$(TARGET_FP32)
-	@echo ""
-	@echo "=== FP32 vectorised (-O3 -march=native -ffast-math) ==="
-	./$(TARGET_FP32V)
+	@echo "============================================================"
+	@echo "BASELINE: GCC 11 -O2"
+	@echo "FP64 + FP32"
+	@echo "============================================================"
+	./$(TARGET_BASE)
 
-# Show disassembly of the hot loop for each binary
-asm:
-	@echo "--- FP64 ---"
-	objdump -d $(TARGET_FP64)  | awk '/dot_fp64/,/^$$/' | head -60
-	@echo "--- FP32 vectorised ---"
-	objdump -d $(TARGET_FP32V) | awk '/dot_fp32/,/^$$/' | head -60
+	@echo ""
+	@echo "============================================================"
+	@echo "AGGRESSIVE: GCC 11 -O3 -march=native -ffast-math"
+	@echo "FP64 + FP32"
+	@echo "============================================================"
+	./$(TARGET_AGGRESSIVE)
+
+	@echo ""
+	@echo "============================================================"
+	@echo "AGGRESSIVE FP16: GCC 14 -O3 -mavx512fp16"
+	@echo "FP64 + FP32 + FP16"
+	@echo "============================================================"
+	./$(TARGET_FP16)
+
+asm: all
+	@echo "=== Baseline FP64 ==="
+	objdump -d -M intel $(TARGET_BASE) \
+	    | awk '/<dot_fp64>:/,/^$$/' | head -80
+
+	@echo ""
+	@echo "=== Baseline FP32 ==="
+	objdump -d -M intel $(TARGET_BASE) \
+	    | awk '/<dot_fp32>:/,/^$$/' | head -80
+
+	@echo ""
+	@echo "=== Aggressive FP64 ==="
+	objdump -d -M intel $(TARGET_AGGRESSIVE) \
+	    | awk '/<dot_fp64>:/,/^$$/' | head -80
+
+	@echo ""
+	@echo "=== Aggressive FP32 ==="
+	objdump -d -M intel $(TARGET_AGGRESSIVE) \
+	    | awk '/<dot_fp32>:/,/^$$/' | head -80
+
+	@echo ""
+	@echo "=== Aggressive FP16 ==="
+	objdump -d -M intel $(TARGET_FP16) \
+	    | awk '/<dot_fp16>:/,/^$$/' | head -80
 
 clean:
-	rm -f $(TARGET_FP64) $(TARGET_FP32) $(TARGET_FP32V) \
-	    perf.data perf.data.old out.perf out.folded flamegraph.svg
+	rm -f $(TARGET_BASE) \
+	    $(TARGET_AGGRESSIVE) \
+	    $(TARGET_FP16) \
+	    perf.data perf.data.old \
+	    out.perf out.folded flamegraph.svg
