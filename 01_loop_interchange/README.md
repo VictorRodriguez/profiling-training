@@ -1,97 +1,236 @@
-# Case Study 01 – Loop Interchange & Cache Performance
+# Case Study 01 – Loop Interchange & Cache Locality
 
 ## Overview
 
-A 2-D array in C is laid out in **row-major order**: `matrix[0][0]`,
-`matrix[0][1]`, … are contiguous in memory.  When the inner loop walks
-*down a column* (`matrix[0][j]`, `matrix[1][j]`, …) every access skips
-an entire row, causing a **cache miss** on virtually every load.
-Swapping the loop order so the inner loop walks *along a row* keeps
-accesses sequential and dramatically reduces cache misses.
+This case study demonstrates how **loop order affects cache locality** and how GCC can automatically apply **loop interchange**.
 
+C stores 2-D arrays in **row-major order**, so elements in the same row are contiguous in memory.
+
+A cache-unfriendly traversal changes the row index in the inner loop:
+
+```c
+for (int j = 0; j < N; ++j) {
+    for (int i = 0; i < N; ++i) {
+        B[i][j] = A[i][j] * 2.0;
+    }
+}
 ```
-Bad  (column-major):  for j → for i  → matrix[i][j]   ← stride N
-Good (row-major):     for i → for j  → matrix[i][j]   ← stride 1
+
+For an `N x N` matrix of `double`, the inner loop advances by:
+
+```text
+N * sizeof(double)
 ```
+
+A cache-friendly traversal changes the column index in the inner loop:
+
+```c
+for (int i = 0; i < N; ++i) {
+    for (int j = 0; j < N; ++j) {
+        B[i][j] = A[i][j] * 2.0;
+    }
+}
+```
+
+Now consecutive accesses are adjacent `double` values:
+
+```text
+sizeof(double) = 8 bytes
+```
+
+This improves spatial locality and cache-line utilization.
+
+---
+
+## Experiment
+
+The example builds three binaries from the same source file:
+
+| Binary | Source traversal | Compiler option | Purpose |
+|---|---|---|---|
+| `loop_bad` | Column-major | `-fno-loop-interchange` | Preserve the cache-unfriendly loop |
+| `loop_compiler` | Column-major | `-floop-interchange` | Allow GCC to interchange the loops |
+| `loop_good` | Row-major | Manual interchange | Programmer-optimized reference |
+
+Conceptually:
+
+```text
+loop_bad
+    column-major source
+    -fno-loop-interchange
+            |
+            v
+    cache-unfriendly generated code
+
+
+loop_compiler
+    same column-major source
+    -floop-interchange
+            |
+            v
+    compiler may change loop order
+
+
+loop_good
+    manually interchanged source
+            |
+            v
+    row-major traversal
+```
+
+---
 
 ## Build
 
+Build all binaries:
+
 ```bash
-make        # builds both loop_bad and loop_good
-make run    # builds and runs both, printing timings
+make
 ```
+
+When GCC successfully applies loop interchange, the compiler may report:
+
+```text
+optimized: loops interchanged in loop nest
+```
+
+Run all three cases:
+
+```bash
+make run
+```
+
+---
 
 ## Profiling with `perf`
 
-### 1. Hardware counter overview (`perf stat`)
+Run the complete comparison:
 
 ```bash
-# Bad version – expect high cache-miss rate
-perf stat -e cache-references,cache-misses,instructions,cycles ./loop_bad
-
-# Good version – expect low cache-miss rate
-perf stat -e cache-references,cache-misses,instructions,cycles ./loop_good
+make perf
 ```
 
-Key metric to watch: **cache-miss rate** = `cache-misses / cache-references`.
-The bad version typically shows > 90 % misses; the good version drops below 5 %.
-
-### 2. Sampling profile (`perf record` / `perf report`)
+The Makefile executes commands equivalent to:
 
 ```bash
-perf record -g ./loop_bad
-perf report
+perf stat -e cycles,instructions,cache-references,cache-misses ./loop_bad
+perf stat -e cycles,instructions,cache-references,cache-misses ./loop_compiler
+perf stat -e cycles,instructions,cache-references,cache-misses ./loop_good
 ```
 
-In the report you will see `sum_column_major` consuming the vast majority of
-cycles, annotated with `LOAD` instructions that miss the L1/L2 cache.
+Useful metrics include:
 
-### 3. Flame Graph
+- execution time
+- cycles
+- instructions
+- IPC
+- cache references
+- cache misses
+
+Generic Linux cache events are hardware-dependent, so focus primarily on the **relative behavior between the binaries** rather than fixed cache-miss thresholds.
+
+---
+
+## Expected Behavior
+
+The cache-unfriendly version should generally show:
+
+```text
+large memory stride
+        |
+        v
+poor spatial locality
+        |
+        v
+more cache / memory-system pressure
+        |
+        v
+more stalled cycles
+        |
+        v
+lower IPC
+        |
+        v
+longer execution time
+```
+
+If GCC applies `-floop-interchange`, `loop_compiler` should behave similarly to the manually optimized `loop_good` version.
+
+---
+
+## Verify the Compiler Transformation
+
+Do not assume the transformation occurred only because the flag was enabled.
+
+Compile with optimization diagnostics:
 
 ```bash
-perf record -F 999 -g ./loop_bad
-perf script > out.perf
-/opt/FlameGraph/stackcollapse-perf.pl out.perf > out.folded
-/opt/FlameGraph/flamegraph.pl out.folded > flamegraph.svg
-# Open flamegraph.svg in a browser
+gcc -O2 \
+    -floop-interchange \
+    -fopt-info-loop-optimized \
+    source.c \
+    -o program
 ```
 
-The flame graph will show a wide tower for `sum_column_major`, confirming it
-dominates CPU time.
+When GCC applies the optimization, it may report:
 
-## Profiling with Intel VTune
-
-```bash
-vtune -collect memory-access -result-dir vtune_bad -- ./loop_bad
-vtune -report summary -result-dir vtune_bad
-
-vtune -collect memory-access -result-dir vtune_good -- ./loop_good
-vtune -report summary -result-dir vtune_good
+```text
+optimized: loops interchanged in loop nest
 ```
 
-Compare **LLC Miss Count** and **Bound on Memory** in both reports.
+The important distinction is:
 
-## Inspecting with `objdump`
-
-```bash
-objdump -d -S loop_bad  | grep -A5 "sum_column_major"
-objdump -d -S loop_good | grep -A5 "sum_row_major"
+```text
+optimization enabled != optimization applied
 ```
 
-With `-O2`, the compiler may auto-vectorise `sum_row_major` and emit `vmovsd`/
-`vaddsd` (or wider `ymm` registers), while `loop_bad` at `-O0` stays scalar.
+GCC still performs legality and profitability analysis before changing the loop nest.
 
-## Expected Results
+---
 
-| Binary      | Approximate time | Cache-miss rate |
-|-------------|-----------------|-----------------|
-| `loop_bad`  | ~500–800 ms     | > 90 %          |
-| `loop_good` | ~80–150 ms      | < 5 %           |
+## Why Some Loops Are Not Interchanged
 
-*(Results vary by CPU model and cache sizes.)*
+A loop such as:
 
-## Fix Summary
+```c
+sum += matrix[i][j];
+```
 
-| Symptom | Root cause | Fix |
-|---------|-----------|-----|
-| High cache-miss rate, slow matrix traversal | Column-major access pattern on a row-major array | Swap loop order so the innermost index matches the last array dimension |
+contains a reduction dependency.
+
+Interchanging the loops changes the order of floating-point additions, and floating-point addition is not strictly associative.
+
+Therefore, GCC may decide that the transformation cannot be safely applied while preserving program semantics.
+
+A better loop-interchange candidate has independent iterations, for example:
+
+```c
+B[i][j] = A[i][j] * 2.0;
+```
+
+---
+
+## Key Takeaway
+
+Loop order can significantly affect performance without changing the high-level algorithm.
+
+```text
+poor loop order
+      |
+      v
+poor spatial locality
+      |
+      v
+more memory stalls
+      |
+      v
+lower IPC
+      |
+      v
+longer execution time
+```
+
+Loop interchange can improve this automatically when the compiler determines that the transformation is legal and profitable.
+
+For deeper details about dependence analysis, failed interchange cases, assembly inspection, vectorization, `perf record`, Flame Graphs, and VTune, see the accompanying Wiki page.
+
