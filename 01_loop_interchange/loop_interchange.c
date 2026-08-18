@@ -112,12 +112,13 @@ static double elapsed_ms(struct timespec start,
 }
 
 
-int main(void)
+int main(int argc, char *argv[])
 {
     struct timespec start;
     struct timespec end;
 
     double runtime_ms;
+    int iterations = 1;
 
 #if !defined(COLUMN_MAJOR) && !defined(ROW_MAJOR)
 #error "Define either COLUMN_MAJOR or ROW_MAJOR"
@@ -127,11 +128,22 @@ int main(void)
 #error "Define only one of COLUMN_MAJOR or ROW_MAJOR"
 #endif
 
+    if (argc > 1) {
+        iterations = atoi(argv[1]);
+
+        if (iterations <= 0) {
+            fprintf(stderr, "Usage: %s [iterations]\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+    }
+
     printf("Matrix size : %d x %d\n", N, N);
 
     printf("Matrix data : %.2f MiB each\n",
            ((double)N * N * sizeof(double)) /
            (1024.0 * 1024.0));
+
+    printf("Iterations  : %d\n", iterations);
 
     initialize();
 
@@ -153,7 +165,9 @@ int main(void)
 
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    process();
+    for (int iteration = 0; iteration < iterations; ++iteration) {
+        process();
+    }
 
     clock_gettime(CLOCK_MONOTONIC, &end);
 
