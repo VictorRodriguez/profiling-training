@@ -1,5 +1,15 @@
 @echo off
 setlocal
-icx /EHsc /O2 /Qstd=c++17 /fsycl gpu_matmul.cpp /Fe:gpu_matmul.exe
+
+echo Building intentionally bad version...
+icx /EHsc /O2 /Zi /Qstd=c++17 /fsycl gpu_matmul_bad.cpp /Fe:gpu_matmul_bad.exe
 if errorlevel 1 exit /b 1
-echo Built gpu_matmul.exe
+
+echo Building fixed version...
+icx /EHsc /O2 /Zi /Qstd=c++17 /fsycl gpu_matmul_good.cpp /Fe:gpu_matmul_good.exe
+if errorlevel 1 exit /b 1
+
+echo.
+echo Built:
+echo   gpu_matmul_bad.exe
+echo   gpu_matmul_good.exe
